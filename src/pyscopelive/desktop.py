@@ -1,4 +1,4 @@
-"""PyScopeLive's first desktop oscilloscope prototype (simulation only)."""
+"""PyScopeLive desktop oscilloscope backed by timestamped sample history."""
 
 from __future__ import annotations
 
@@ -21,23 +21,21 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .signals import SUPPORTED_WAVEFORMS, generate_waveform
+from .acquisition import AcquisitionEngine
+from .signals import SUPPORTED_WAVEFORMS
 
 
 class ScopeWindow(QMainWindow):
-    """A basic time-domain oscilloscope with simulated signal sources."""
+    """A simulated desktop oscilloscope; UI is a consumer of acquired samples."""
 
-    SAMPLE_COUNT = 1600
-    UPDATE_INTERVAL_MS = 33  # Roughly 30 frames per second
+    UPDATE_INTERVAL_MS = 33
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("PyScopeLive — Desktop Oscilloscope")
         self.resize(1100, 700)
-
+        self.engine = AcquisitionEngine(sample_rate_hz=4000, history_s=5.0)
         self._is_running = True
-        self._elapsed_before_pause = 0.0
-        self._resumed_at = perf_counter()
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -47,7 +45,7 @@ class ScopeWindow(QMainWindow):
         heading = QLabel("PyScopeLive")
         heading.setStyleSheet("font-size: 25px; font-weight: bold;")
         layout.addWidget(heading)
-        layout.addWidget(QLabel("Simulated signal source · Desktop prototype (Milestone 1)"))
+        layout.addWidget(QLabel("Simulated signal · Timestamped acquisition (Milestone 2)"))
 
         controls = QGroupBox("Waveform controls")
         controls_layout = QHBoxLayout(controls)
@@ -90,19 +88,25 @@ class ScopeWindow(QMainWindow):
         self.plot_widget.setLabel("bottom", "Time relative to now", units="s")
         self.plot_widget.showGrid(x=True, y=True, alpha=0.25)
         self.plot_widget.setMouseEnabled(x=False, y=False)
-        self.curve = self.plot_widget.plot(
-            pen=pg.mkPen(color="#38BDF8", width=2)
-        )
+        self.curve = self.plot_widget.plot(pen=pg.mkPen(color="#38BDF8", width=2))
         layout.addWidget(self.plot_widget, stretch=1)
 
         self.stats = QLabel("Window Vpp: —    Window RMS: —")
         layout.addWidget(self.stats)
-        self.statusBar().showMessage("Simulation mode · No acquisition hardware connected")
+        self.statusBar().showMessage("Simulation · 4000 samples/s · No hardware connected")
 
+        self.kind.currentTextChanged.connect(self._configure_source)
+        self.frequency.valueChanged.connect(self._configure_source)
+        self.amplitude.valueChanged.connect(self._configure_source)
+        self.time_window.valueChanged.connect(self._render_snapshot)
+
+        # Start with a prefilled display window; no samples are created in render.
+        self.engine.advance(self.time_window.value())
+        self._render_snapshot()
+        self._last_tick = perf_counter()
         self.timer = QTimer(self)
         self.timer.setInterval(self.UPDATE_INTERVAL_MS)
-        self.timer.timeout.connect(self._update_plot)
-        self._update_plot()
+        self.timer.timeout.connect(self._tick)
         self.timer.start()
 
     @staticmethod
@@ -114,43 +118,51 @@ class ScopeWindow(QMainWindow):
         column.addWidget(widget)
         return container
 
-    def _current_time(self) -> float:
-        if self._is_running:
-            return self._elapsed_before_pause + (perf_counter() - self._resumed_at)
-        return self._elapsed_before_pause
-
-    def _toggle_pause(self) -> None:
-        if self._is_running:
-            self._elapsed_before_pause = self._current_time()
-            self._is_running = False
-            self.timer.stop()
-            self.pause_button.setText("Resume")
-            self.statusBar().showMessage("Paused · Simulation mode")
-        else:
-            self._resumed_at = perf_counter()
-            self._is_running = True
-            self.pause_button.setText("Pause")
-            self.statusBar().showMessage("Simulation mode · No acquisition hardware connected")
-            self.timer.start()
-
-    def _update_plot(self) -> None:
-        duration = self.time_window.value()
-        x = np.linspace(-duration, 0.0, self.SAMPLE_COUNT, endpoint=False)
-        times = x + self._current_time()
-        y = generate_waveform(
-            kind=self.kind.currentText(),
-            times_s=times,
+    def _configure_source(self, *_args: object) -> None:
+        self.engine.configure(
+            waveform=self.kind.currentText(),
             frequency_hz=self.frequency.value(),
             amplitude_v=self.amplitude.value(),
         )
-        self.curve.setData(x, y)
+        # Existing samples remain unchanged until replaced by new acquisition.
+
+    def _toggle_pause(self) -> None:
+        if self._is_running:
+            self._is_running = False
+            self.timer.stop()
+            self.pause_button.setText("Resume")
+            self.statusBar().showMessage("Paused · Acquired samples are frozen")
+        else:
+            self._is_running = True
+            self._last_tick = perf_counter()  # no catch-up while paused
+            self.pause_button.setText("Pause")
+            self.statusBar().showMessage("Simulation · 4000 samples/s · No hardware connected")
+            self.timer.start()
+
+    def _tick(self) -> None:
+        now = perf_counter()
+        self.engine.advance(max(0.0, now - self._last_tick))
+        self._last_tick = now
+        self._render_snapshot()
+
+    def _render_snapshot(self, *_args: object) -> None:
+        duration = self.time_window.value()
+        snap = self.engine.snapshot(duration)
+        if snap.count:
+            x = snap.times_s - snap.end_time_s
+            y = snap.volts_v
+            self.curve.setData(x, y)
+            self.stats.setText(
+                f"Window Vpp: {np.ptp(y):.2f} V    "
+                f"Window RMS: {np.sqrt(np.mean(y * y)):.2f} V    "
+                f"Samples: {snap.count}"
+            )
+        else:
+            self.curve.setData([], [])
+            self.stats.setText("Window Vpp: —    Window RMS: —    Samples: 0")
         self.plot_widget.setXRange(-duration, 0.0, padding=0.0)
         y_limit = max(0.5, self.amplitude.value() * 1.2)
         self.plot_widget.setYRange(-y_limit, y_limit, padding=0.0)
-        self.stats.setText(
-            f"Window Vpp: {np.ptp(y):.2f} V    "
-            f"Window RMS: {np.sqrt(np.mean(y * y)):.2f} V"
-        )
 
 
 def main() -> None:
