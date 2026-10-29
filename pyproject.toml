@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyscopelive"
+version = "0.1.0"
+description = "A Python desktop and future web oscilloscope"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0,<3",
+    "PyQt6>=6.8,<7",
+    "pyqtgraph>=0.13.7,<1",
+]
+
+[project.scripts]
+pyscopelive = "pyscopelive.desktop:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
