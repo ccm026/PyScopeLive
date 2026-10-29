@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PyScopeLive — Web Oscilloscope</title>
+<style>
+:root{color-scheme:dark;font:15px system-ui,Segoe UI,Arial;color:#ecf4ff;background:#08101d}
+*{box-sizing:border-box}main{max-width:1300px;margin:auto;padding:22px}
+h1{margin:0;font-size:28px}p.sub{color:#a2b2c9;margin:6px 0 24px}
+.panel{background:#111e31;border:1px solid #273d57;border-radius:12px;padding:18px;margin-bottom:16px}
+.controls{display:flex;align-items:end;gap:16px;flex-wrap:wrap}
+.controls label{display:flex;flex-direction:column;gap:6px;min-width:140px;color:#b9cee6;font-size:13px}
+select,input,button{padding:10px;border-radius:6px;background:#0c1626;color:#f5faff;border:1px solid #52647e;font:inherit}
+button{min-width:110px;cursor:pointer;background:#146aa0;border-color:#2688b9}button:hover{background:#1a82c2}
+#scope{width:100%;height:460px;display:block;background:#0b1220;border:1px solid #28415e;border-radius:6px}
+.metrics{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;margin-top:12px;color:#b9cee6}
+#connection{font-weight:600;color:#f9b96b}#connection.online{color:#7dd3a5}
+small{color:#a2b2c9}
+</style>
+</head>
+<body>
+<main>
+<h1>PyScopeLive</h1>
+<p class="sub">Milestone 3 · Web oscilloscope · Shared Python acquisition server</p>
+<section class="panel controls">
+<label>Waveform<select id="waveform"><option>Sine</option><option>Square</option><option>Triangle</option></select></label>
+<label>Frequency (Hz)<input id="frequency" type="number" min="0.5" max="100" step="0.5" value="5"></label>
+<label>Peak amplitude (V)<input id="amplitude" type="number" min="0.1" max="10" step="0.1" value="2"></label>
+<label>Time window (s)<input id="window" type="number" min="0.05" max="2" step="0.05" value="0.4"></label>
+<button id="pause">Pause</button>
+</section>
+<section class="panel">
+<canvas id="scope" aria-label="Live simulated voltage against time"></canvas>
+<div class="metrics"><span id="metrics">Waiting for samples…</span><span id="connection">Connecting…</span></div>
+</section>
+<small>Simulated data only; no external hardware is connected. All clients share one acquisition stream. The browser time window is local to this view.</small>
+</main>
+<script>
+'use strict';
+const el = id => document.getElementById(id);
+const canvas = el('scope'), ctx = canvas.getContext('2d');
+let ws, latest=null, paused=false, syncTimer=0;
+const windowInput = el('window');
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function updateCanvas() {
+ const bounds=canvas.getBoundingClientRect();
+ const scale=window.devicePixelRatio||1;
+ canvas.width=Math.max(1,Math.round(bounds.width*scale));
+ canvas.height=Math.max(1,Math.round(bounds.height*scale));
+ ctx.setTransform(scale,0,0,scale,0,0);
+ draw();
+}
+function draw(){
+ const w=canvas.clientWidth,h=canvas.clientHeight;
+ ctx.clearRect(0,0,w,h);
+ ctx.fillStyle='#0b1220';ctx.fillRect(0,0,w,h);
+ const L=55,R=20,T=20,B=42,pw=w-L-R,ph=h-T-B;
+ if(pw<50||ph<30)return;
+ const state=latest?.state||{amplitude_v:2};
+ const seconds=clamp(Number(windowInput.value)||0.4,0.05,2);
+ const maxV=Math.max(0.5,state.amplitude_v*1.2);
+ const fx=t=>L+(t/1000+seconds)/seconds*pw;
+ const fy=v=>T+(maxV-v)/(2*maxV)*ph;
+ ctx.font='12px system-ui';ctx.textAlign='right';ctx.strokeStyle='#25354d';ctx.fillStyle='#9cafc8';ctx.lineWidth=1;
+ for(let i=0;i<=8;i++){let x=L+pw*i/8;ctx.beginPath();ctx.moveTo(x,T);ctx.lineTo(x,T+ph);ctx.stroke();ctx.fillText(((-seconds+seconds*i/8)*1000).toFixed(0),x+9,h-18)}
+ for(let i=0;i<=8;i++){let v=maxV*(1-i/4);let y=T+ph*i/8;ctx.beginPath();ctx.moveTo(L,y);ctx.lineTo(w-R,y);ctx.stroke();ctx.fillText(v.toFixed(1),L-7,y+4)}
+ ctx.textAlign='center';ctx.fillText('Time relative to now (ms)',L+pw/2,h-4);
+ ctx.save();ctx.translate(14,T+ph/2);ctx.rotate(-Math.PI/2);ctx.fillText('Voltage (V)',0,0);ctx.restore();
+ if(!latest)return;
+ const t=latest.times_ms,v=latest.volts_v;
+ ctx.strokeStyle='#38bdf8';ctx.lineWidth=2;ctx.beginPath();let started=false;
+ for(let i=0;i<t.length;i++){
+  if(t[i] < -seconds*1000 || !Number.isFinite(v[i]))continue;
+  const x=fx(t[i]),y=fy(v[i]);if(!started){ctx.moveTo(x,y);started=true}else ctx.lineTo(x,y);
+ }
+ if(started)ctx.stroke();
+}
+async function control(changes){
+ try{
+  const res=await fetch('/api/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(changes)});
+  if(!res.ok)throw new Error(`HTTP ${res.status}`);
+ }catch(err){el('connection').textContent=`Control error: ${err.message}`;}
+}
+for(const [id,key] of [['waveform','waveform'],['frequency','frequency_hz'],['amplitude','amplitude_v']]){
+ el(id).addEventListener('change',()=>{
+  const value=id==='waveform'?el(id).value:Number(el(id).value);
+  if(id!=='waveform'&&(!Number.isFinite(value)||value<=0))return;
+  control({[key]:value});
+ });
+}
+windowInput.addEventListener('change',()=>{windowInput.value=clamp(Number(windowInput.value)||0.4,0.05,2).toFixed(2);if(ws)ws.close();draw()});
+el('pause').addEventListener('click',()=>control({paused:!paused}));
+function connect(){
+ ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws?window_s=${encodeURIComponent(windowInput.value)}`);
+ ws.onopen=()=>{el('connection').textContent='Connected · shared stream';el('connection').classList.add('online')};
+ ws.onmessage=e=>{
+  const frame=JSON.parse(e.data);latest=frame;const state=frame.state;paused=state.paused;
+  // Keep settings synchronized without disrupting actively edited fields.
+  for(const [id,val] of [['waveform',state.waveform],['frequency',state.frequency_hz],['amplitude',state.amplitude_v]]){
+    if(document.activeElement!==el(id))el(id).value=val;
+  }
+  el('pause').textContent=paused?'Resume':'Pause';
+  el('metrics').textContent=`Vpp: ${frame.vpp_v===null?'—':frame.vpp_v.toFixed(2)+' V'} · RMS: ${frame.rms_v===null?'—':frame.rms_v.toFixed(2)+' V'} · Samples: ${frame.count} · ${paused?'Paused':'Running'}`;
+  draw();
+ };
+ ws.onclose=()=>{el('connection').textContent='Disconnected · reconnecting…';el('connection').classList.remove('online');setTimeout(connect,1500)};
+ ws.onerror=()=>ws.close();
+}
+window.addEventListener('resize',updateCanvas);
+updateCanvas();connect();
+</script>
+</body>
+</html>
